@@ -6157,5 +6157,222 @@
         assert.equal(child.getAttribute('title'), 'kept');
       }
     );
+
+    QUnit.module('IN_PLACE: hook-detached subtrees');
+
+    // A hook that detaches a node via node.remove() (the documented removal
+    // pattern) takes the subtree out of the tree before the walker reaches
+    // its descendants, and hook-detached nodes are deliberately not recorded
+    // in DOMPurify.removed. Without an inline neutralize after the element
+    // hooks, a descendant that was already loading keeps its queued on*
+    // handler and fires in page scope after sanitize returns, even though the
+    // returned tree is clean. onerror with no src: assert the attribute is
+    // gone rather than waiting for a load. Covers both element hooks.
+    [
+      { hook: 'uponSanitizeElement', label: 'uponSanitizeElement' },
+      { hook: 'beforeSanitizeElements', label: 'beforeSanitizeElements' },
+    ].forEach(({ hook, label }) => {
+      QUnit.test(
+        'IN_PLACE: ' +
+          label +
+          ' node.remove() neutralizes the detached subtree (audit-5 F1)',
+        (assert) => {
+          const root = document.createElement('div');
+          root.innerHTML =
+            '<section><img id="tail" onerror="alert(1)"></section>' +
+            '<div>safe</div>';
+          const tail = root.querySelector('#tail');
+
+          DOMPurify.addHook(hook, (node) => {
+            if (node.nodeName === 'SECTION') {
+              node.remove();
+            }
+          });
+
+          try {
+            const ret = DOMPurify.sanitize(root, { IN_PLACE: true });
+
+            assert.equal(ret, root, 'returns the same in-place node');
+            assert.notOk(
+              ret.querySelector('section, #tail'),
+              'detached subtree is absent from the returned tree'
+            );
+            assert.strictEqual(
+              tail.getAttribute('onerror'),
+              null,
+              'on* handler stripped from the hook-detached descendant'
+            );
+
+            // App-side store-and-rerender must expose no executable sink.
+            const probe = document.createElement('div');
+            probe.innerHTML = ret.outerHTML + tail.outerHTML;
+            assert.notOk(
+              probe.querySelector('[onerror],[onload],script'),
+              'no executable sink survives serialize/reparse: ' +
+                probe.innerHTML
+            );
+          } finally {
+            DOMPurify.removeHook(hook);
+          }
+        }
+      );
+    });
+
+    // Variant: the detached subtree is deeper than one level, carries several
+    // handler-bearing resource elements, is detached via
+    // parentNode.removeChild() rather than node.remove(), and is attached to
+    // the live document (the caller's real page tree). Every descendant must
+    // be neutralized, while allow-listed attributes survive so the subtree is
+    // scrubbed through the same allowlist as kept nodes.
+    [
+      { hook: 'uponSanitizeElement', label: 'uponSanitizeElement' },
+      { hook: 'beforeSanitizeElements', label: 'beforeSanitizeElements' },
+    ].forEach(({ hook, label }) => {
+      QUnit.test(
+        'IN_PLACE: ' +
+          label +
+          ' removeChild() neutralizes every depth of a live detached subtree',
+        (assert) => {
+          const root = document.createElement('div');
+          root.innerHTML =
+            '<article><div><p>' +
+            '<img id="hd-deep" class="keep" onerror="window.__hdFired=1">' +
+            '<video id="hd-video" onerror="window.__hdFired=2"></video>' +
+            '</p></div>' +
+            '<svg id="hd-svg" onload="window.__hdFired=3"></svg>' +
+            '<a id="hd-link" href="#ok" onclick="window.__hdFired=4">x</a>' +
+            '</article><p id="hd-after">after</p>';
+          document.body.appendChild(root);
+
+          const deep = root.querySelector('#hd-deep');
+          const video = root.querySelector('#hd-video');
+          const svg = root.querySelector('#hd-svg');
+          const link = root.querySelector('#hd-link');
+
+          const detach = function (node) {
+            if (node.nodeName === 'ARTICLE') {
+              node.parentNode.removeChild(node);
+            }
+          };
+
+          DOMPurify.addHook(hook, detach);
+
+          try {
+            DOMPurify.sanitize(root, { IN_PLACE: true });
+
+            assert.notOk(
+              root.querySelector('article'),
+              'detached subtree is absent from the returned tree'
+            );
+            assert.ok(
+              root.querySelector('#hd-after'),
+              'the walk continued past the detached subtree'
+            );
+            assert.strictEqual(
+              deep.getAttribute('onerror'),
+              null,
+              'nested <img> onerror stripped'
+            );
+            assert.strictEqual(
+              video.getAttribute('onerror'),
+              null,
+              'nested <video> onerror stripped'
+            );
+            assert.strictEqual(
+              svg.getAttribute('onload'),
+              null,
+              'nested <svg> onload stripped'
+            );
+            assert.strictEqual(
+              link.getAttribute('onclick'),
+              null,
+              'nested <a> onclick stripped'
+            );
+            assert.strictEqual(
+              deep.getAttribute('class'),
+              'keep',
+              'allow-listed attribute kept on the neutralized descendant'
+            );
+            assert.strictEqual(
+              link.getAttribute('href'),
+              '#ok',
+              'allow-listed href kept on the neutralized descendant'
+            );
+          } finally {
+            DOMPurify.removeHook(hook, detach);
+            root.remove();
+          }
+        }
+      );
+    });
+
+    QUnit.test(
+      'IN_PLACE: hook-detached subtree inside an attached shadow root is neutralized',
+      (assert) => {
+        const host = document.createElement('div');
+        if (typeof host.attachShadow !== 'function') {
+          assert.ok(true, 'attachShadow unsupported in this engine; skipped');
+          return;
+        }
+
+        const shadow = host.attachShadow({ mode: 'open' });
+        shadow.innerHTML =
+          '<section><img id="sd-tail" onerror="window.__hdFired=5"></section>' +
+          '<p id="sd-keep" data-keep="1">kept</p>';
+        const tail = shadow.querySelector('#sd-tail');
+
+        const detach = function (node) {
+          if (node.nodeName === 'SECTION') {
+            node.remove();
+          }
+        };
+
+        DOMPurify.addHook('uponSanitizeElement', detach);
+
+        try {
+          DOMPurify.sanitize(host, { IN_PLACE: true });
+
+          assert.notOk(
+            host.shadowRoot.querySelector('section'),
+            'detached subtree is absent from the shadow root'
+          );
+          assert.strictEqual(
+            tail.getAttribute('onerror'),
+            null,
+            'on* handler stripped from the hook-detached shadow descendant'
+          );
+          const kept = host.shadowRoot.querySelector('#sd-keep');
+          assert.ok(kept, 'sibling content of the shadow root is kept');
+          assert.strictEqual(
+            kept.getAttribute('data-keep'),
+            '1',
+            'the shadow root itself is a walk root, not a detached subtree'
+          );
+        } finally {
+          DOMPurify.removeHook('uponSanitizeElement', detach);
+        }
+      }
+    );
+
+    QUnit.test(
+      'IN_PLACE: a detached walk root is sanitized, not neutralized as hook-detached',
+      (assert) => {
+        // A parentless IN_PLACE root is legitimate input. It must go through
+        // the normal walk (data-* / aria-* kept), not be stripped down to the
+        // bare ALLOWED_ATTR set as if a hook had detached it.
+        const root = document.createElement('div');
+        root.setAttribute('data-root', 'r');
+        root.innerHTML =
+          '<p data-x="1" aria-label="y" onclick="window.__hdFired=6">t</p>';
+
+        DOMPurify.sanitize(root, { IN_PLACE: true });
+
+        const p = root.querySelector('p');
+        assert.strictEqual(root.getAttribute('data-root'), 'r');
+        assert.strictEqual(p.getAttribute('data-x'), '1');
+        assert.strictEqual(p.getAttribute('aria-label'), 'y');
+        assert.strictEqual(p.getAttribute('onclick'), null);
+      }
+    );
   };
 });
