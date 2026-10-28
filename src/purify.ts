@@ -1797,6 +1797,29 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
       if (_isDocumentFragment(shadowNode.content)) {
         _sanitizeShadowDOM(shadowNode.content);
       }
+
+      /* An element iterated here may itself host an attached
+         shadow root. The default NodeIterator does not enter shadow
+         trees, so a shadow root nested inside template.content was
+         previously reached by no walk at all (the pre-pass at
+         _sanitizeAttachedShadowRoots descends via childNodes, which
+         doesn't enter template.content; the template-content recursion
+         above iterates the content but never inspected shadowRoot).
+         Walk it explicitly. The nodeType guard avoids reading
+         shadowRoot off text / comment / CDATA / PI nodes that the
+         iterator also surfaces. */
+      const shadowNodeType = getNodeType
+        ? getNodeType(shadowNode)
+        : (shadowNode as Node).nodeType;
+      if (shadowNodeType === NODE_TYPE.element) {
+        const innerSr = getShadowRoot
+          ? getShadowRoot(shadowNode)
+          : (shadowNode as Element).shadowRoot;
+        if (_isDocumentFragment(innerSr)) {
+          _sanitizeAttachedShadowRoots(innerSr);
+          _sanitizeShadowDOM(innerSr);
+        }
+      }
     }
 
     /* Execute a hook if present */
@@ -1873,6 +1896,23 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
 
     for (const child of snapshot) {
       _sanitizeAttachedShadowRoots(child);
+    }
+
+    /* When the root is a <template>, also descend into root.content.
+       The name is lower-cased unconditionally (not via transformCaseFunc)
+       so that HTML-document templates are still recognised when
+       PARSER_MEDIA_TYPE is application/xhtml+xml. */
+    if (nodeType === NODE_TYPE.element) {
+      const rootName = getNodeName ? getNodeName(root) : null;
+      if (
+        typeof rootName === 'string' &&
+        stringToLowerCase(rootName) === 'template'
+      ) {
+        const content = (root as HTMLTemplateElement).content;
+        if (_isDocumentFragment(content)) {
+          _sanitizeAttachedShadowRoots(content);
+        }
+      }
     }
   };
 
