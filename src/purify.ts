@@ -1418,12 +1418,23 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
       ) &&
         !ALLOWED_TAGS[tagName])
     ) {
-      /* Check if we have a custom element to handle */
+      /* Check if we have a custom element to handle.
+         A custom element kept via CUSTOM_ELEMENT_HANDLING exits early
+         (the namespace and fallback-tag removal checks below are
+         intentionally skipped for it), but it must still run through
+         afterSanitizeElements so the element-hook lifecycle matches
+         normal allowlisted elements: a security policy applied in this
+         hook (e.g. stripping an attribute from every surviving element)
+         must not silently skip kept custom elements
+         (GHSA-c2j3-45gr-mqc4). The walker's subsequent
+         _sanitizeAttributes pass then sanitizes the element's
+         attributes, exactly as for a normal element. */
       if (!FORBID_TAGS[tagName] && _isBasicCustomElement(tagName)) {
         if (
           CUSTOM_ELEMENT_HANDLING.tagNameCheck instanceof RegExp &&
           regExpTest(CUSTOM_ELEMENT_HANDLING.tagNameCheck, tagName)
         ) {
+          _executeHooks(hooks.afterSanitizeElements, currentNode, null);
           return false;
         }
 
@@ -1431,6 +1442,7 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
           CUSTOM_ELEMENT_HANDLING.tagNameCheck instanceof Function &&
           CUSTOM_ELEMENT_HANDLING.tagNameCheck(tagName)
         ) {
+          _executeHooks(hooks.afterSanitizeElements, currentNode, null);
           return false;
         }
       }
