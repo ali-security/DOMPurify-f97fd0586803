@@ -190,6 +190,29 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
   let trustedTypesPolicy;
   let emptyHTML = '';
 
+  // The instance's own internal Trusted Types policy. Unlike a caller-supplied
+  // `TRUSTED_TYPES_POLICY`, this is created at most once — Trusted Types throws
+  // on duplicate policy names — and is the only policy allowed to persist
+  // across configurations and survive `clearConfig()`.
+  let defaultTrustedTypesPolicy;
+  let defaultTrustedTypesPolicyResolved = false;
+
+  // Lazily resolve (and cache) the instance's internal default policy.
+  // Resolution is attempted at most once: a successful `createPolicy` cannot be
+  // repeated (Trusted Types throws on duplicate names), and a failed or
+  // unsupported attempt must not be retried on every parse.
+  const _getDefaultTrustedTypesPolicy = function () {
+    if (!defaultTrustedTypesPolicyResolved) {
+      defaultTrustedTypesPolicy = _createTrustedTypesPolicy(
+        trustedTypes,
+        currentScript
+      );
+      defaultTrustedTypesPolicyResolved = true;
+    }
+
+    return defaultTrustedTypesPolicy;
+  };
+
   const {
     implementation,
     createNodeIterator,
@@ -760,6 +783,12 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
       delete FORBID_TAGS.tbody;
     }
 
+    // Re-derive the active Trusted Types policy from this configuration on
+    // every parse. The active policy must never be sticky closure state that
+    // outlives the config that set it: a caller-supplied policy left in place
+    // after `clearConfig()` — or after `TRUSTED_TYPES_POLICY: null` — could
+    // sign a subsequent "default" `RETURN_TRUSTED_TYPE` result with a foreign,
+    // possibly unsafe policy. See GHSA-vxr8-fq34-vvx9.
     if (cfg.TRUSTED_TYPES_POLICY) {
       if (typeof cfg.TRUSTED_TYPES_POLICY.createHTML !== 'function') {
         throw typeErrorCreate(
@@ -773,22 +802,36 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
         );
       }
 
-      // Overwrite existing TrustedTypes policy.
+      // A caller-supplied policy applies to this configuration only.
       trustedTypesPolicy = cfg.TRUSTED_TYPES_POLICY;
 
       // Sign local variables required by `sanitize`.
       emptyHTML = trustedTypesPolicy.createHTML('');
     } else {
-      // Uninitialized policy, attempt to initialize the internal dompurify policy.
-      if (trustedTypesPolicy === undefined) {
-        trustedTypesPolicy = _createTrustedTypesPolicy(
-          trustedTypes,
-          currentScript
-        );
+      if (cfg.TRUSTED_TYPES_POLICY === null) {
+        // An explicit `TRUSTED_TYPES_POLICY: null` drops any previously
+        // retained caller policy, so it cannot resurface on this or a later
+        // call; the internal default policy is restored below instead.
+        // See GHSA-vxr8-fq34-vvx9.
+        trustedTypesPolicy = undefined;
+        emptyHTML = '';
       }
 
-      // If creating the internal policy succeeded sign internal variables.
-      if (trustedTypesPolicy !== null && typeof emptyHTML === 'string') {
+      // No policy supplied: keep the currently active policy if one is set — a
+      // previously supplied policy is intentionally sticky across config-less
+      // calls — otherwise fall back to the instance's own internal policy,
+      // created at most once. (What must not linger is a policy whose
+      // configuration has been torn down via `clearConfig()` or an explicit
+      // `null`, both of which restore the default.)
+      if (trustedTypesPolicy === undefined) {
+        trustedTypesPolicy = _getDefaultTrustedTypesPolicy();
+      }
+
+      // Sign internal variables only when a policy is active. A falsy policy
+      // (Trusted Types unsupported or policy creation failed) leaves
+      // `emptyHTML` as a plain string, so we never call `.createHTML` on a
+      // non-policy and throw.
+      if (trustedTypesPolicy && typeof emptyHTML === 'string') {
         emptyHTML = trustedTypesPolicy.createHTML('');
       }
     }
@@ -2157,6 +2200,13 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
   DOMPurify.clearConfig = function () {
     CONFIG = null;
     SET_CONFIG = false;
+
+    // Drop any caller-supplied Trusted Types policy so it cannot poison later
+    // `RETURN_TRUSTED_TYPE` output. The internal default policy (cached, and
+    // never recreated — Trusted Types throws on duplicate names) is restored by
+    // the next `_parseConfig`. See GHSA-vxr8-fq34-vvx9.
+    trustedTypesPolicy = defaultTrustedTypesPolicy;
+    emptyHTML = '';
   };
 
   DOMPurify.isValidAttribute = function (tag, attr, value) {
