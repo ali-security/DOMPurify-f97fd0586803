@@ -3590,5 +3590,38 @@
         document.body.removeChild(iframe);
       }
     );
+
+    QUnit.module('selectedcontent (customizable select)');
+
+    QUnit.test(
+      'selectedcontent is not allowed by default (customizable select)',
+      (assert) => {
+        // <selectedcontent> mirrors the content of the selected <option> of a
+        // customizable <select>, so it must not be part of the default
+        // allow-list.
+        const payloads = [
+          '<selectedcontent></selectedcontent>',
+          '<selectedcontent>a</selectedcontent>',
+          '<select><button><selectedcontent></selectedcontent></button><option>a</option></select>',
+          '<select><button><selectedcontent></selectedcontent></button><option selected><b>a</b></option><option>b</option></select>',
+          '<div><select><button><SELECTEDCONTENT></SELECTEDCONTENT></button><option><img src=x onerror=alert(1)></option></select></div>',
+        ];
+
+        payloads.forEach((payload) => {
+          const clean = DOMPurify.sanitize(payload);
+          assert.notOk(
+            /selectedcontent/i.test(clean),
+            `selectedcontent removed from: ${payload}`
+          );
+          assert.notOk(/onerror=/i.test(clean), `no onerror= in: ${payload}`);
+
+          const dom = DOMPurify.sanitize(payload, { RETURN_DOM: true });
+          assert.notOk(
+            dom.querySelector('selectedcontent'),
+            `no selectedcontent element in RETURN_DOM for: ${payload}`
+          );
+        });
+      }
+    );
   };
 });

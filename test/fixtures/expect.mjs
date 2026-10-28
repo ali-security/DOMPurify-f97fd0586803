@@ -935,8 +935,8 @@ export default [
     "payload": "<button popovertargetaction=\"show\" popovertarget=\"popover\">Show Popover</button>",
     "expected": "<button popovertargetaction=\"show\" popovertarget=\"popover\">Show Popover</button>"
   }, {
-    "title":"Testing support for selectedcontent",
+    "title":"Removes selectedcontent by default",
     "payload": "<selectedcontent></selectedcontent>",
-    "expected": "<selectedcontent></selectedcontent>"
+    "expected": ""
   },
 ];
