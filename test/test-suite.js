@@ -982,6 +982,205 @@
         window.xssed = false;
       }
     );
+
+    QUnit.test(
+      'throws instead of returning a force-removed rawtext root (mXSS reparse)',
+      (assert) => {
+        // A <style> passed as the IN_PLACE root whose text content already
+        // carries its own end tag is force-removed by the mXSS text canary:
+        // its literal serialization ("</style><img ...>") re-opens markup on
+        // an HTML reparse. The attribute pass cancels the attribute axis (the
+        // onclick below) but cannot defang rawtext text, so the detached root
+        // must not be handed back to the caller. Fail closed — assert the
+        // return contract, not merely a scrubbed textContent, so a future
+        // refactor cannot pass by defanging text while still returning.
+        const dirty = document.createElement('style');
+        dirty.setAttribute('onclick', 'alert(1)');
+        dirty.textContent = '</style><img src=x onerror=alert(1)>';
+        document.body.appendChild(dirty);
+
+        assert.throws(
+          () => DOMPurify.sanitize(dirty, { IN_PLACE: true }),
+          /refusing to sanitize in place/,
+          'force-removed rawtext root is not returned'
+        );
+        assert.ok(
+          DOMPurify.removed.some((entry) => entry.element === dirty),
+          'root was recorded as removed during the aborted call'
+        );
+
+        if (dirty.parentNode) {
+          dirty.parentNode.removeChild(dirty);
+        }
+        window.xssed = false;
+      }
+    );
+
+    QUnit.test(
+      'still returns the root when a rawtext CHILD (not the root) is removed',
+      (assert) => {
+        // The fail-closed guard must fire ONLY when the ROOT itself is
+        // force-removed. A dangerous rawtext child is detached from the
+        // returned root as usual; the root remains safe to return, so the
+        // guard must not over-trigger on ordinary child removals.
+        const dirty = document.createElement('div');
+        dirty.innerHTML = '<span>ok</span>';
+        const style = document.createElement('style');
+        style.textContent = '</style><img src=x onerror=alert(1)>';
+        dirty.appendChild(style);
+        document.body.appendChild(dirty);
+
+        const clean = DOMPurify.sanitize(dirty, { IN_PLACE: true });
+        assert.equal(clean, dirty, 'returns the input root');
+        assert.equal(
+          dirty.querySelector('style'),
+          null,
+          'dangerous rawtext child removed from the returned root'
+        );
+        assert.equal(
+          dirty.querySelector('span').textContent,
+          'ok',
+          'safe sibling content preserved'
+        );
+
+        if (dirty.parentNode) {
+          dirty.parentNode.removeChild(dirty);
+        }
+        window.xssed = false;
+      }
+    );
+
+    QUnit.test(
+      'force-removed IN_PLACE root exposes no sink on store-and-rerender (GHSA-6688-9rhm-gjv2)',
+      (assert) => {
+        // Exploit shape from the advisory: an attached rawtext root is
+        // force-removed (detached) by the walk, yet was handed back with its
+        // literal `</tag>`-bearing text intact; the app then stores
+        // outerHTML and re-renders it, and the reparse re-opens the markup.
+        // Covers every rawtext root-kill reason present in this version.
+        // onerror with no src: assert the reparsed attribute, not a load.
+        const breakout = (tag) =>
+          '</' + tag + '><img class="gh6688-sink" onerror="alert(1)">';
+        const cases = [
+          {
+            label: 'text-only <style> root (mXSS text canary)',
+            cfg: {},
+            mustThrow: true,
+            build: () => {
+              const node = document.createElement('style');
+              node.setAttribute('onclick', 'alert(1)');
+              node.textContent = breakout('style');
+              return node;
+            },
+          },
+          {
+            label: '<style> root with an element child (style mXSS rule)',
+            cfg: {},
+            mustThrow: true,
+            build: () => {
+              const node = document.createElement('style');
+              node.appendChild(document.createTextNode(breakout('style')));
+              node.appendChild(document.createElement('b'));
+              return node;
+            },
+          },
+          {
+            label: '<noscript> root with an element child (fallback-tag check)',
+            cfg: { ADD_TAGS: ['noscript'] },
+            mustThrow: false,
+            build: () => {
+              const node = document.createElement('noscript');
+              node.appendChild(document.createTextNode(breakout('noscript')));
+              node.appendChild(document.createElement('b'));
+              return node;
+            },
+          },
+        ];
+
+        cases.forEach(({ label, cfg, mustThrow, build }) => {
+          const root = build();
+          document.body.appendChild(root);
+
+          let returned = null;
+          let threw = false;
+          try {
+            returned = DOMPurify.sanitize(
+              root,
+              Object.assign({ IN_PLACE: true }, cfg)
+            );
+          } catch (_) {
+            threw = true;
+          }
+
+          const recordedRemoved = DOMPurify.removed.some(
+            (entry) => entry.element === root
+          );
+
+          if (mustThrow) {
+            assert.ok(threw, label + ': fails closed by throwing');
+          }
+
+          assert.notOk(
+            recordedRemoved && !threw,
+            label + ': a root recorded as removed is never returned'
+          );
+
+          // App-side store-and-rerender (serialize -> reparse).
+          if (returned) {
+            const probe = document.createElement('div');
+            probe.innerHTML = returned.outerHTML;
+            assert.notOk(
+              probe.querySelector('[onerror],[onload],script'),
+              label +
+                ': no executable sink survives serialize/reparse: ' +
+                probe.innerHTML
+            );
+          } else {
+            assert.ok(threw, label + ': nothing returned to re-render');
+          }
+
+          if (root.parentNode) {
+            root.parentNode.removeChild(root);
+          }
+        });
+
+        window.xssed = false;
+      }
+    );
+
+    QUnit.test(
+      'throws for a root force-removed by the namespace check (GHSA-6688-9rhm-gjv2)',
+      (assert) => {
+        // The guard is reason-agnostic: an SVG <g> root under an HTML parent
+        // is killed by the namespace-confusion check, not by a rawtext probe.
+        // DOMPurify itself decided the root must not exist in this context,
+        // so it must not be handed back to the caller either.
+        const parent = document.createElement('div');
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('onclick', 'alert(1)');
+        parent.appendChild(g);
+        document.body.appendChild(parent);
+
+        try {
+          assert.throws(
+            () => DOMPurify.sanitize(g, { IN_PLACE: true }),
+            /refusing to sanitize in place/,
+            'namespace-killed root is not returned'
+          );
+          assert.ok(
+            DOMPurify.removed.some((entry) => entry.element === g),
+            'root was recorded as removed during the aborted call'
+          );
+        } finally {
+          if (parent.parentNode) {
+            parent.parentNode.removeChild(parent);
+          }
+        }
+
+        window.xssed = false;
+      }
+    );
+
     QUnit.test(
       'Config-Flag tests: RETURN_DOM with DOM input sanitizes clonable shadow root',
       function (assert) {
