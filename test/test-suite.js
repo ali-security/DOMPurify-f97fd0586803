@@ -5758,5 +5758,106 @@
         );
       }
     );
+
+    QUnit.module('Regression — IN_PLACE spoofed instance nodeName');
+
+    QUnit.test(
+      'IN_PLACE removes a <script> whose instance nodeName is spoofed as DIV',
+      (assert) => {
+        // A hostile live node can shadow the Node.prototype.nodeName getter
+        // with an own property. _sanitizeElements must classify the element
+        // through the cached prototype getter, not the instance-visible
+        // value, otherwise the real <script> is treated as an allowed <div>.
+        const host = document.createElement('div');
+        const script = document.createElement('script');
+        script.textContent = 'window.xssed = true';
+        Object.defineProperty(script, 'nodeName', {
+          value: 'DIV',
+          configurable: true,
+        });
+        host.appendChild(script);
+
+        DOMPurify.sanitize(host, { IN_PLACE: true });
+
+        assert.equal(
+          host.getElementsByTagName('script').length,
+          0,
+          'spoofed <script> must be removed in-place'
+        );
+        assert.notOk(
+          /xssed/.test(host.innerHTML),
+          'script body must not survive in-place'
+        );
+      }
+    );
+
+    QUnit.test(
+      'IN_PLACE uponSanitizeElement hook sees the real tag name of a spoofed node',
+      (assert) => {
+        const seen = [];
+        const recordTagName = (node, data) => {
+          seen.push(data.tagName);
+        };
+        DOMPurify.addHook('uponSanitizeElement', recordTagName);
+
+        const host = document.createElement('div');
+        const script = document.createElement('script');
+        Object.defineProperty(script, 'nodeName', {
+          value: 'P',
+          configurable: true,
+        });
+        host.appendChild(script);
+
+        try {
+          DOMPurify.sanitize(host, { IN_PLACE: true });
+        } finally {
+          DOMPurify.removeHook('uponSanitizeElement', recordTagName);
+        }
+
+        assert.ok(
+          seen.indexOf('script') !== -1,
+          'hook receives the real tag name'
+        );
+        assert.equal(
+          seen.indexOf('p'),
+          -1,
+          'hook does not receive the spoofed tag name'
+        );
+        assert.equal(host.getElementsByTagName('script').length, 0);
+      }
+    );
+
+    QUnit.test(
+      'IN_PLACE attribute checks use the real tag name of a spoofed node',
+      (assert) => {
+        // An allowed element spoofing a custom-element nodeName must not
+        // inherit the permissive CUSTOM_ELEMENT_HANDLING attribute policy.
+        const host = document.createElement('div');
+        const el = document.createElement('div');
+        el.setAttribute('onclick', 'window.xssed = true');
+        el.setAttribute('title', 'kept');
+        Object.defineProperty(el, 'nodeName', {
+          value: 'X-SPOOF',
+          configurable: true,
+        });
+        host.appendChild(el);
+
+        DOMPurify.sanitize(host, {
+          IN_PLACE: true,
+          CUSTOM_ELEMENT_HANDLING: {
+            tagNameCheck: /^x-/,
+            attributeNameCheck: /.+/,
+          },
+        });
+
+        const child = host.firstChild;
+        assert.ok(child, 'allowed <div> is kept');
+        assert.notOk(
+          child.hasAttribute('onclick'),
+          'event handler must be stripped from the real <div>'
+        );
+        assert.equal(child.getAttribute('title'), 'kept');
+      }
+    );
   };
 });
