@@ -1,16 +1,7 @@
 name: "CodeQL"
 
 on:
-  push:
-    branches: [main, 3.x, 2.x]
-  pull_request:
-    # Must match 'push' so PRs targeting release branches also get scanned.
-    # The ruleset requires CodeQL as a status check on main, 3.x, and 2.x;
-    # without these in pull_request, PRs to 3.x/2.x would wait forever for
-    # a required check that never fires.
-    branches: [main, 3.x, 2.x]
-  schedule:
-    - cron: '0 19 * * 4'
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -28,31 +28,7 @@ name: Build & Test
 #      file exists purely to satisfy the required-check machinery.
 
 on:
-  pull_request:
-    paths:
-      - '**/*.md'
-      - 'demos/**'
-      - 'website/**'
-      - 'LICENSE'
-      - '.gitattributes'
-      - '.editorconfig'
-      - '.prettierignore'
-      - '.prettierrc'
-      - '.nvmrc'
-      - '.gitignore'
-      - '.husky/**'
-      - '.pre-commit-config.yaml'
-      - 'osv-scanner.toml'
-      - '.github/ISSUE_TEMPLATE.md'
-      - '.github/PULL_REQUEST_TEMPLATE.md'
-      - '.github/FUNDING.yml'
-      - '.github/dependabot.yml'
-      - '.github/workflows/codeql-analysis.yml'
-      - '.github/workflows/dependency-review.yml'
-      - '.github/workflows/fuzz.yml'
-      - '.github/workflows/scorecard.yml'
-      - '.github/workflows/sign-release.yml'
-      - '.github/workflows/slsa-provenance.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
