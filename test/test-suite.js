@@ -984,6 +984,208 @@
     );
 
     QUnit.test(
+      'IN_PLACE strips boundary-spanning expressions inside an attached shadow root',
+      (assert) => {
+        // Same split-expression bug class as the CVE-2026-41239 light-DOM
+        // tests above, but the halves live in an attached shadow root.
+        // _sanitizeShadowDOM strips expressions per text node during its
+        // walk, but the post-walk normalize-and-rescrub (_scrubTemplateExpressions)
+        // historically ran only on the light-DOM root (`dirty` / `body`):
+        // NodeIterator does not descend into shadow trees and normalize()
+        // does not merge text across the shadow boundary, so a '${...}' split
+        // by a removed <object> separator reconstituted on
+        // shadowRoot.textContent and would be interpolated by a downstream
+        // template engine. The shadow walk now runs the same post-walk scrub.
+        const host = document.createElement('div');
+        const root = host.attachShadow({ mode: 'open' });
+        root.appendChild(document.createTextNode('$'));
+        // <object> is not in the default ALLOWED_TAGS; its removal leaves the
+        // surrounding text nodes adjacent.
+        root.appendChild(document.createElement('object'));
+        root.appendChild(document.createTextNode('{alert(1)}'));
+
+        DOMPurify.sanitize(host, {
+          SAFE_FOR_TEMPLATES: true,
+          IN_PLACE: true,
+        });
+        host.shadowRoot.normalize();
+        assert.notOk(
+          /\$\{[\s\S]*\}/.test(host.shadowRoot.textContent),
+          'merged template-literal expression should be scrubbed in shadow root'
+        );
+      }
+    );
+
+    QUnit.test(
+      'IN_PLACE strips boundary-spanning expressions inside a NESTED shadow root',
+      (assert) => {
+        // The post-walk scrub must reach shadow roots nested inside other
+        // shadow roots, each of which is walked by its own recursive
+        // _sanitizeShadowDOM call.
+        const host = document.createElement('div');
+        const outer = host.attachShadow({ mode: 'open' });
+        const section = document.createElement('section');
+        outer.appendChild(section);
+        const inner = section.attachShadow({ mode: 'open' });
+        inner.appendChild(document.createTextNode('$'));
+        inner.appendChild(document.createElement('object'));
+        inner.appendChild(document.createTextNode('{alert(1)}'));
+
+        DOMPurify.sanitize(host, {
+          SAFE_FOR_TEMPLATES: true,
+          IN_PLACE: true,
+        });
+        const innerRoot = host.shadowRoot.querySelector('section').shadowRoot;
+        innerRoot.normalize();
+        assert.notOk(
+          /\$\{[\s\S]*\}/.test(innerRoot.textContent),
+          'merged expression should be scrubbed in nested shadow root'
+        );
+      }
+    );
+
+    QUnit.test(
+      'IN_PLACE strips boundary-spanning expressions in a template inside a shadow root',
+      (assert) => {
+        // The shadow-walk scrub is non-recursive; template content inside a
+        // shadow root must still be scrubbed by its own _sanitizeShadowDOM
+        // call. The light-DOM scrub cannot reach it (querySelectorAll does not
+        // enter shadow roots).
+        const host = document.createElement('div');
+        const root = host.attachShadow({ mode: 'open' });
+        const tmpl = document.createElement('template');
+        root.appendChild(tmpl);
+        tmpl.content.appendChild(document.createTextNode('$'));
+        tmpl.content.appendChild(document.createElement('object'));
+        tmpl.content.appendChild(document.createTextNode('{alert(1)}'));
+
+        DOMPurify.sanitize(host, {
+          SAFE_FOR_TEMPLATES: true,
+          IN_PLACE: true,
+        });
+        const kept = host.shadowRoot.querySelector('template');
+        const text = kept ? kept.content.textContent : '';
+        assert.notOk(
+          /\$\{[\s\S]*\}/.test(text),
+          'merged expression should be scrubbed in template content inside a shadow root'
+        );
+      }
+    );
+
+    QUnit.test(
+      'template-expression scrub work stays linear in template nesting depth',
+      (assert) => {
+        // Every nested <template>.content is walked by its own
+        // _sanitizeShadowDOM call. If that walk's post-scrub also recursed
+        // into descendant templates, each fragment would be rescrubbed once
+        // per ancestor (n(n+1)/2 normalize() calls; seconds of CPU for a
+        // ~20KB payload). Count normalize() calls instead of timing, so the
+        // assertion is deterministic across engines.
+        const depth = 60;
+        const dirty =
+          '<div>' +
+          '<template>'.repeat(depth) +
+          'x' +
+          '</template>'.repeat(depth) +
+          '</div>';
+        const proto = window.Node.prototype;
+        const originalNormalize = proto.normalize;
+        let calls = 0;
+        proto.normalize = function () {
+          calls++;
+          return originalNormalize.call(this);
+        };
+
+        try {
+          DOMPurify.sanitize(dirty, { SAFE_FOR_TEMPLATES: true });
+          DOMPurify.sanitize(dirty, {
+            SAFE_FOR_TEMPLATES: true,
+            RETURN_DOM: true,
+          });
+        } finally {
+          proto.normalize = originalNormalize;
+        }
+
+        assert.ok(
+          calls <= 4 * (depth + 1),
+          'normalize() called ' +
+            calls +
+            ' times for depth ' +
+            depth +
+            '; expected linear growth'
+        );
+      }
+    );
+
+    QUnit.test(
+      'RETURN_DOM / RETURN_DOM_FRAGMENT strip boundary-spanning expressions inside a clonable shadow root',
+      (assert) => {
+        // DOM-input variant of the shadow-root split-expression bypass: a
+        // clonable shadow root is deep-copied by importNode() and walked by
+        // _sanitizeShadowDOM, but the post-walk light-DOM scrub on `body`
+        // never enters it. Feature-detect clonable shadow roots (jsdom
+        // ignores the option) and rely on the browser pass otherwise.
+        let supportsClonable = false;
+        try {
+          const probeHost = document.createElement('div');
+          probeHost.attachShadow({ mode: 'open', clonable: true }).innerHTML =
+            '<span>x</span>';
+          const imported = document.importNode(probeHost, true);
+          supportsClonable = !!(
+            imported.shadowRoot && imported.shadowRoot.querySelector('span')
+          );
+        } catch (_) {}
+
+        if (!supportsClonable) {
+          assert.ok(
+            true,
+            'environment does not support clonable shadow roots; skipping'
+          );
+          return;
+        }
+
+        const makeHost = () => {
+          const host = document.createElement('div');
+          const root = host.attachShadow({ mode: 'open', clonable: true });
+          root.appendChild(document.createTextNode('$'));
+          root.appendChild(document.createElement('object'));
+          root.appendChild(document.createTextNode('{alert(1)}'));
+          return host;
+        };
+
+        const dom = DOMPurify.sanitize(makeHost(), {
+          SAFE_FOR_TEMPLATES: true,
+          RETURN_DOM: true,
+        });
+        const domHost = dom.querySelector('div');
+        assert.ok(
+          domHost && domHost.shadowRoot,
+          'cloned shadow root present on RETURN_DOM host'
+        );
+        domHost.shadowRoot.normalize();
+        assert.notOk(
+          /\$\{[\s\S]*\}/.test(domHost.shadowRoot.textContent),
+          'merged expression should be scrubbed in RETURN_DOM shadow root'
+        );
+
+        const fragment = DOMPurify.sanitize(makeHost(), {
+          SAFE_FOR_TEMPLATES: true,
+          RETURN_DOM_FRAGMENT: true,
+        });
+        const fragmentHost = fragment.querySelector('div');
+        assert.ok(
+          fragmentHost && fragmentHost.shadowRoot,
+          'cloned shadow root present on RETURN_DOM_FRAGMENT host'
+        );
+        fragmentHost.shadowRoot.normalize();
+        assert.notOk(
+          /\$\{[\s\S]*\}/.test(fragmentHost.shadowRoot.textContent),
+          'merged expression should be scrubbed in RETURN_DOM_FRAGMENT shadow root'
+        );
+      }
+    );
+
+    QUnit.test(
       'throws instead of returning a force-removed rawtext root (mXSS reparse)',
       (assert) => {
         // A <style> passed as the IN_PLACE root whose text content already
